@@ -4,7 +4,8 @@ This directory contains the Windows adaptation of the Elden Ring portion of
 [minecraft-crossover-bridge](https://github.com/justbustin/minecraft-crossover-bridge)
 by justbustin. The original MIT notice is preserved in [LICENSE](LICENSE).
 
-The project targets Elden Ring App Ver. 1.17.1 (`eldenring.exe` 2.7.1.0) and
+The project targets Elden Ring App Ver. 1.17.2 (`eldenring.exe` 2.7.2.0) or
+1.17.1 (`eldenring.exe` 2.7.1.0) and
 Minecraft Java Edition 1.21.1 on Windows x64. The maintained bridge is under
 [elden-ring/](elden-ring/README.md).
 

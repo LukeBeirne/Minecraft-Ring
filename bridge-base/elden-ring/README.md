@@ -1,8 +1,9 @@
 # Elden Ring bridge
 
 Native and Fabric sources for [Minecraft Ring](../../README.md), the
-experimental Windows x64 bridge for Elden Ring App Ver. 1.17.1
-(`eldenring.exe` 2.7.1.0) and Minecraft Java Edition 1.21.1.
+experimental Windows x64 bridge for Elden Ring App Ver. 1.17.2
+(`eldenring.exe` 2.7.2.0) or 1.17.1 (`eldenring.exe` 2.7.1.0) and Minecraft
+Java Edition 1.21.1.
 
 | Directory | Contents |
 | --- | --- |

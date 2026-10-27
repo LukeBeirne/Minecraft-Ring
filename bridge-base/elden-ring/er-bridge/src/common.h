@@ -74,6 +74,8 @@ bool game_init();
 void game_detach();    // shutdown step 1: our tasks stop calling into this core
 void game_shutdown();  // step 2, once nothing runs our code: hand the character back
 void game_fill_state(ErmcGameState* st);
+uintptr_t game_vt_depth_stencil_view();  // DLCG3::CGDepthStencilView vtable RVA for the detected build
+uintptr_t game_vt_texture_2d();          // DLCG3::CGTexture2D vtable RVA for the detected build
 
 // compositor.cpp: draws Minecraft's frames into Elden Ring's at Present (D3D12).
 bool compositor_init();

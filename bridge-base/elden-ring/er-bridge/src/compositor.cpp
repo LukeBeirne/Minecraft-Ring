@@ -781,13 +781,11 @@ static bool copy_slot(ErmcFrameHeader* h, RingSlot& r, bool* hand) {
 
 // ---------------------------------------------------------------------------------------
 // Elden Ring's scene depth, for occlusion. The engine wraps each depth-stencil view in a
-// DLCG3::CGDepthStencilView (vtable RVA 0x30A7850): +0x08 is its DLCG3::CGTexture2D (vtable
-// 0x30A7030), +0x18 the DSV format; the texture's +0x20 is D3DMetal's ID3D12Resource. The
+// DLCG3::CGDepthStencilView: +0x08 is its DLCG3::CGTexture2D, +0x18 the DSV format; the
+// texture's +0x20 is D3DMetal's ID3D12Resource (vtable RVAs per build in game.cpp). The
 // worker thread finds the views by scanning the heap for that vtable; the Present thread
 // re-validates each chain, asks D3D12 for the resource's size and keeps the full-screen ones.
 
-constexpr uintptr_t kVtCGDepthStencilView = 0x30A7850;
-constexpr uintptr_t kVtCGTexture2D = 0x30A7030;
 static const int kMaxDepthScan = 32;
 static const int kMaxDepthCands = 8;
 struct DepthScanHit {
@@ -823,8 +821,9 @@ static DXGI_FORMAT depth_srv_format(DXGI_FORMAT f) {
 
 // Worker thread (compositor_poll): the heap scan takes a few seconds.
 static void scan_depth_views() {
+    if (!game_vt_depth_stencil_view()) return;
     uintptr_t base = main_module_base();
-    uint64_t pat = base + kVtCGDepthStencilView;
+    uint64_t pat = base + game_vt_depth_stencil_view();
     uint8_t mask[8];
     memset(mask, 0xFF, sizeof(mask));
     static uintptr_t hits[256];
@@ -834,7 +833,7 @@ static void scan_depth_views() {
         uint8_t* dsv = (uint8_t*)hits[i];
         if (!mem_readable(dsv, 0x20)) continue;
         uint8_t* tex = *(uint8_t**)(dsv + 8);
-        if (!tex || !mem_readable(tex, 0x28) || *(uintptr_t*)tex != base + kVtCGTexture2D) continue;
+        if (!tex || !mem_readable(tex, 0x28) || *(uintptr_t*)tex != base + game_vt_texture_2d()) continue;
         ID3D12Resource* res = *(ID3D12Resource**)(tex + 0x20);
         if (!res) continue;
         bool dup = false;
@@ -862,9 +861,9 @@ static void adopt_depth_views() {
     for (int i = 0; i < g_scanHitCount && g_depthCandCount < kMaxDepthCands; i++) {
         DepthScanHit& h = g_scanHits[i];
         // Still the same view -> texture -> resource chain (nothing was destroyed meanwhile)?
-        if (!mem_readable(h.dsv, 0x20) || *(uintptr_t*)h.dsv != base + kVtCGDepthStencilView ||
+        if (!mem_readable(h.dsv, 0x20) || *(uintptr_t*)h.dsv != base + game_vt_depth_stencil_view() ||
             *(uint8_t**)(h.dsv + 8) != h.tex || !mem_readable(h.tex, 0x28) ||
-            *(uintptr_t*)h.tex != base + kVtCGTexture2D || *(ID3D12Resource**)(h.tex + 0x20) != h.res)
+            *(uintptr_t*)h.tex != base + game_vt_texture_2d() || *(ID3D12Resource**)(h.tex + 0x20) != h.res)
             continue;
         if (!readable(h.res, 8)) continue;
         D3D12_RESOURCE_DESC d = h.res->GetDesc();

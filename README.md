@@ -67,7 +67,7 @@ See the [changelog](CHANGELOG.md) for the full list.
 | Component | Supported setup |
 | --- | --- |
 | Operating system | Windows x64 |
-| Elden Ring | App Ver. **1.17.1**, executable **2.7.1.0**; other builds are unverified |
+| Elden Ring | App Ver. **1.17.2** (executable **2.7.2.0**) or **1.17.1** (executable **2.7.1.0**); other builds are refused |
 | Minecraft | Java Edition **1.21.1** |
 | Fabric Loader / API | **0.19.5** / **0.116.17+1.21.1**, pinned in the project |
 | Build tools | Python 3, LLVM-MinGW, **JDK 25**, **Gradle 9.7.1** |

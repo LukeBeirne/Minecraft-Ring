@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Elden Ring 1.17.2
+
+- Added support for Elden Ring App Ver. 1.17.2 (`eldenring.exe` 2.7.2.0).
+  The native bridge detects the build at startup and uses its address table;
+  App Ver. 1.17.1 (`eldenring.exe` 2.7.1.0) remains supported.
+
 ## 0.3.0 — 2026-10-06
 
 ### Terrain collision

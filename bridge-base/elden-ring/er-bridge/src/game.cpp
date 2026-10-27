@@ -1,6 +1,7 @@
-// Elden Ring-specific memory access and hooks (eldenring.exe 2.7.1.0 = App Ver. 1.17.1).
-// Addresses and layouts were found by reverse engineering this build and verified live; each is
-// checked against its byte signature at startup.
+// Elden Ring-specific memory access and hooks. Supported builds: eldenring.exe 2.7.1.0 (App Ver.
+// 1.17.1) and 2.7.2.0 (App Ver. 1.17.2). Addresses and layouts were found by reverse engineering
+// 2.7.1.0 and verified live; the 2.7.2.0 table was ported from it (signatures, RTTI, singleton
+// accessors). game_init picks the build whose code signatures all match.
 //
 // No inline hooks: per-frame code runs as tasks registered with the game's own task system
 // (CSTaskImp::RegisterTask), so Arxan's code restoration can't undo anything. The task
@@ -30,30 +31,87 @@
 
 namespace mb {
 
+// Per-build addresses (RVAs). Struct layouts below are shared by all supported builds.
+struct GameBuild {
+    const char* name;
+    // statics
+    uintptr_t worldChrMan;          // static WorldChrManImp*
+    uintptr_t csCamera;             // static CSCamera*
+    uintptr_t csHavokMan;           // static CSHavokMan*
+    uintptr_t csTaskImp;            // static CSTaskImp*
+    uintptr_t csActionButtonMan;    // static CSActionButtonManImp*
+    uintptr_t msgRepository;        // static MsgRepositoryImp*
+    uintptr_t worldGeomMan;         // static CSWorldGeomManImp*: map assets per block
+    uintptr_t csBulletManager;      // static CSBulletManager*
+    uintptr_t soloParamRepository;  // static SoloParamRepositoryImp*
+    uintptr_t worldAreaTime;        // static WorldAreaTimeImp*
+    uintptr_t weather;              // static weather controller*
+    uintptr_t clockHold;            // u16 next to the WorldAreaTime static: native clock hold
+    // code
+    uintptr_t registerTask;         // bool (CSTaskImp*, u32 group, FD4TaskBase*)
+    uintptr_t castRay;              // bool (CSPhysWorld*, u32 filter, vec4* origin, vec4* delta, vec4* hit, ChrIns* ignore)
+    uintptr_t kill;                 // void ChrIns::Kill(ChrIns*, u8) (the game's debug "kill main player" calls it with 0)
+    uintptr_t modifyHp;             // void (CSChrDataModule*, int delta, u8, u8, f32, f32, u8)
+    uintptr_t spawnBullet;          // u32* (CSBulletManager*, u32* outHandle, const BulletSpawnData*, u32* outErr)
+    uintptr_t canTarget;            // u32 (ChrIns* self, ChrIns* other)
+    uintptr_t forceDeath;           // void (ChrIns*, bool awardRunes): Kill without drops when false
+    uintptr_t requestWorldTime;     // WorldAreaTime::request_time
+    uintptr_t requestWorldWeather;  // ordinary weather request
+    uintptr_t requestRegionalWeather;
+    uintptr_t fpsLimit;             // "mov dword [rbx+1C], 1/60f" in the frame limiter
+    uintptr_t action[6];            // kActionSigs, same order
+    uintptr_t envCheck[7];          // kEnvCheckSigs, same order
+    const char* envRipSig[3];       // RIP-relative loads of weather / time / clock hold
+    uintptr_t envRip[3];
+    // vtables (RTTI) used to validate pointers before touching them
+    uintptr_t vtWorldChrMan, vtPlayerIns, vtEnemyIns, vtPersCam, vtTaskImp, vtDataModule, vtPhysModule;
+    uintptr_t vtActionButtonMan, vtMsgRepository, vtWorldGeomMan;
+    uintptr_t vtGeomDynamicIns;         // CSWorldGeomDynamicIns (movable/usable assets)
+    uintptr_t vtAnimSkeletonModifier;   // CSFD4LocationAnimSkeletonToMdlObjIdxModifier
+    uintptr_t vtDebugChrCreator;        // CSDebugChrCreator
+    uintptr_t vtCGDepthStencilView;     // DLCG3::CGDepthStencilView (compositor depth scan)
+    uintptr_t vtCGTexture2D;            // DLCG3::CGTexture2D
+};
+
+static const GameBuild kBuilds[] = {
+    {"2.7.1.0 (App Ver. 1.17.1)",
+     0x3D69FF8, 0x3D669C8, 0x3D7A0D0, 0x458FE88, 0x3D72478, 0x3D81568, 0x3D6DC18, 0x3D667A8, 0x3D85F58,
+     0x3D6D368, 0x3D6D3F0, 0x3D6D370,
+     0xEB3E50, 0xC71E00, 0x3EE730, 0x436A40, 0x3A2CB0, 0x51B610, 0x5EE570,
+     0x644EF0, 0x6480C0, 0x6481B0, 0xE849BD,
+     {0xA658A1, 0xA656CC, 0xA64FA0, 0xA64E61, 0x266FC40, 0x2670510},
+     {0x644EF0, 0x6480C0, 0x6481B0, 0x6480D5, 0x647979, 0x644A61, 0x644A80},
+     {"48 8B 0D 65 51 72 03", "48 8B 0D 04 2C 72 03", "44 38 35 F7 88 72 03"},
+     {0x648284, 0x64A75D, 0x644A72},
+     0x2A4E980, 0x2A7FBB0, 0x2A47090, 0x2AA0A40, 0x2C04B00, 0x2A380B8, 0x2A3C890,
+     0x2B48140, 0x2BAD530, 0x2A89130, 0x2A87278, 0x2B6F1A0, 0x2A51220,
+     0x30A7850, 0x30A7030},
+    {"2.7.2.0 (App Ver. 1.17.2)",
+     0x3D6D018, 0x3D699E8, 0x3D7D0F0, 0x4592EA8, 0x3D75498, 0x3D84588, 0x3D70C38, 0x3D697C8, 0x3D88F78,
+     0x3D70388, 0x3D70410, 0x3D70390,
+     0xEB5540, 0xC722C0, 0x3EE730, 0x436AD0, 0x3A2CB0, 0x51B8B0, 0x5EEA20,
+     0x6453A0, 0x648570, 0x648660, 0xE860AD,
+     {0xA65D61, 0xA65B8C, 0xA65460, 0xA65321, 0x2671370, 0x2671C40},
+     {0x6453A0, 0x648570, 0x648660, 0x648585, 0x647E29, 0x644F11, 0x644F30},
+     {"48 8B 0D D5 7C 72 03", "48 8B 0D 74 57 72 03", "44 38 35 67 B4 72 03"},
+     {0x648734, 0x64AC0D, 0x644F22},
+     0x2A509D0, 0x2A81CB0, 0x2A49090, 0x2AA2B30, 0x2C06DB0, 0x2A3A0C8, 0x2A3E890,
+     0x2B4A230, 0x2BAF7E0, 0x2A8B230, 0x2A89378, 0x2B71290, 0x2A53340,
+     0x30A9B10, 0x30A92F0},
+};
+static const GameBuild* g_build = nullptr;
+
+uintptr_t game_vt_depth_stencil_view() { return g_build ? g_build->vtCGDepthStencilView : 0; }
+uintptr_t game_vt_texture_2d() { return g_build ? g_build->vtCGTexture2D : 0; }
+
+// The active build's addresses under their historical names (set by use_build in game_init).
 namespace rva {
-constexpr uintptr_t kWorldChrMan = 0x3D69FF8;   // static WorldChrManImp*
-constexpr uintptr_t kCSCamera = 0x3D669C8;      // static CSCamera*
-constexpr uintptr_t kCSHavokMan = 0x3D7A0D0;    // static CSHavokMan*
-constexpr uintptr_t kCSTaskImp = 0x458FE88;     // static CSTaskImp*
-constexpr uintptr_t kRegisterTask = 0xEB3E50;   // bool (CSTaskImp*, u32 group, FD4TaskBase*)
-constexpr uintptr_t kCastRay = 0xC71E00;        // bool (CSPhysWorld*, u32 filter, vec4* origin, vec4* delta, vec4* hit, ChrIns* ignore)
-constexpr uintptr_t kKill = 0x3EE730;           // void ChrIns::Kill(ChrIns*, u8) (the game's debug "kill main player" calls it with 0)
-constexpr uintptr_t kCSActionButtonMan = 0x3D72478;  // static CSActionButtonManImp*
-constexpr uintptr_t kMsgRepository = 0x3D81568;      // static MsgRepositoryImp*
-constexpr uintptr_t kWorldGeomMan = 0x3D6DC18;       // static CSWorldGeomManImp*: map assets per block
-// vtables (RTTI) used to validate pointers before touching them
-constexpr uintptr_t kVtWorldChrMan = 0x2A4E980;
-constexpr uintptr_t kVtPlayerIns = 0x2A7FBB0;
-constexpr uintptr_t kVtEnemyIns = 0x2A47090;
-constexpr uintptr_t kVtPersCam = 0x2AA0A40;
-constexpr uintptr_t kVtTaskImp = 0x2C04B00;
-constexpr uintptr_t kVtDataModule = 0x2A380B8;
-constexpr uintptr_t kVtPhysModule = 0x2A3C890;
-constexpr uintptr_t kVtActionButtonMan = 0x2B48140;
-constexpr uintptr_t kVtMsgRepository = 0x2BAD530;
-constexpr uintptr_t kVtWorldGeomMan = 0x2A89130;
-constexpr uintptr_t kVtGeomDynamicIns = 0x2A87278;        // CSWorldGeomDynamicIns (movable/usable assets)
-constexpr uintptr_t kVtAnimSkeletonModifier = 0x2B6F1A0;  // CSFD4LocationAnimSkeletonToMdlObjIdxModifier
+static uintptr_t kWorldChrMan, kCSCamera, kCSHavokMan, kCSTaskImp, kRegisterTask, kCastRay, kKill;
+static uintptr_t kCSActionButtonMan, kMsgRepository, kWorldGeomMan;
+static uintptr_t kWorldAreaTime, kWeather, kClockHold;
+static uintptr_t kRequestWorldTime, kRequestWorldWeather, kRequestRegionalWeather, kFpsLimit;
+static uintptr_t kVtWorldChrMan, kVtPlayerIns, kVtEnemyIns, kVtPersCam, kVtTaskImp, kVtDataModule, kVtPhysModule;
+static uintptr_t kVtActionButtonMan, kVtMsgRepository, kVtWorldGeomMan, kVtGeomDynamicIns, kVtAnimSkeletonModifier;
 }  // namespace rva
 
 // WorldChrMan
@@ -112,15 +170,30 @@ static uintptr_t g_base = 0;
 static bool g_ok = false;
 
 struct CodeSig {
-    uintptr_t rva;
+    const uintptr_t* rva;  // into the active build's addresses
     const char* sig;
     const char* name;
 };
 
+static const char* const kSigRegisterTask = "48 89 5C 24 08 57 48 83 EC 40 48 8D 4C 24 20 49 8B D8 8B FA E8";
+static const char* const kSigCastRay = "40 55 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 70 FF FF FF 48 81 EC 90 01 00 00";
+static const char* const kSigKill = "48 89 5C 24 08 57 48 83 EC 30 F3 0F 10 05 ?? ?? ?? ?? 48 8B D9 48 8B 89 90 01 00 00 0F B6 FA C6 44 24 28 01";
+
 static const CodeSig kSigs[] = {
-    {rva::kRegisterTask, "48 89 5C 24 08 57 48 83 EC 40 48 8D 4C 24 20 49 8B D8 8B FA E8", "CSTaskImp::RegisterTask"},
-    {rva::kCastRay, "40 55 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 70 FF FF FF 48 81 EC 90 01 00 00", "CSPhysWorld::CastRay"},
-    {rva::kKill, "48 89 5C 24 08 57 48 83 EC 30 F3 0F 10 05 ?? ?? ?? ?? 48 8B D9 48 8B 89 90 01 00 00 0F B6 FA C6 44 24 28 01", "ChrIns::Kill"},
+    {&rva::kRegisterTask, kSigRegisterTask, "CSTaskImp::RegisterTask"},
+    {&rva::kCastRay, kSigCastRay, "CSPhysWorld::CastRay"},
+    {&rva::kKill, kSigKill, "ChrIns::Kill"},
+};
+
+// Time/weather code the optional world commands rely on (GameBuild::envCheck order).
+static const char* const kEnvCheckSigs[7] = {
+    "44 89 4C 24 20 44 89 44 24 18 89 54 24 10 48 83 EC 28",  // request_time
+    "48 89 5C 24 10 48 89 74 24 20 57 48 83 EC 20",           // ordinary weather request
+    "40 57 48 83 EC 50 48 C7 44 24 20 FE FF FF FF",           // regional weather request
+    "66 83 B9 1C 02 00 00 FF",
+    "0F B6 91 0F 02 00 00",
+    "44 38 73 45",
+    "44 39 73 40",
 };
 
 static bool bytes_match(uintptr_t addr, const char* sig) {
@@ -155,7 +228,7 @@ static uint8_t* global_ptr(uintptr_t rvaAddr, uintptr_t vtRva) {
 
 
 // Optional world commands. These layouts and entry points were checked against
-// eldenring.exe 2.7.1.0; WorldAreaTime::request_time is also documented by
+// eldenring.exe 2.7.1.0 (and the same code in 2.7.2.0); WorldAreaTime::request_time is also documented by
 // https://github.com/vswarte/fromsoftware-rs/blob/main/crates/eldenring/src/cs/world_area_time.rs
 static bool g_environmentOk = false;
 static uint8_t* g_environmentTime = nullptr;
@@ -181,14 +254,14 @@ using RequestRegionalWeather = bool(__fastcall*)(void*, const uint32_t*, bool);
 
 static bool scripted_weather(const uint8_t* weather) {
     // F9 belongs exclusively to ChangeWeather's timed script override. Ordinary
-    // requests use 6480C0, which respects that override and the fixed-weather lock.
+    // requests use RequestWorldWeather, which respects that override and the fixed-weather lock.
     // F7 is also used by normal regional weather and must not suspend the bridge.
     return weather[0xF5] || weather[0xF9] || weather[0x91] ||
         *(const int16_t*)(weather + 0x21C) != -1;
 }
 
 static void release_environment_time() {
-    uint8_t* time = global_ptr(0x3D6D368, 0);
+    uint8_t* time = global_ptr(rva::kWorldAreaTime, 0);
     if (g_environmentTime && time == g_environmentTime && mem_readable(time, 0x48)) {
         // A script may have changed the rate since we acquired the clock.
         if (*(float*)(time + 0x38) == 0.0f) *(float*)(time + 0x38) = g_environmentTimeRate;
@@ -198,7 +271,7 @@ static void release_environment_time() {
 }
 
 static void release_environment_weather(bool regional) {
-    uint8_t* weather = global_ptr(0x3D6D3F0, 0);
+    uint8_t* weather = global_ptr(rva::kWeather, 0);
     if (g_environmentWeather && weather == g_environmentWeather && mem_readable(weather, 0x220)) {
         if (*(int8_t*)(weather + 0x20F) == 1) *(int8_t*)(weather + 0x20F) = g_environmentIndoorOverride;
         int16_t kind = environment_weather(g_environmentWeatherKind);
@@ -216,7 +289,7 @@ static void release_environment_weather(bool regional) {
             // entry, instead of keeping the bridge's last rain/storm type.
             int16_t current = *(int16_t*)(weather + 0x2A);
             *(int16_t*)(weather + 0x2A) = -1;
-            ((RequestRegionalWeather)(g_base + 0x6481B0))(weather, &block, false);
+            ((RequestRegionalWeather)(g_base + rva::kRequestRegionalWeather))(weather, &block, false);
             *(int16_t*)(weather + 0x2A) = current;
         }
     }
@@ -256,15 +329,15 @@ static void service_environment(bool ready, uint32_t zone) {
         return;
     }
     if (env.dayTicks >= 24000 || env.weather > 2) return;
-    uint8_t* weather = global_ptr(0x3D6D3F0, 0);
-    uint8_t* time = global_ptr(0x3D6D368, 0);
+    uint8_t* weather = global_ptr(rva::kWeather, 0);
+    uint8_t* time = global_ptr(rva::kWorldAreaTime, 0);
     bool haveWeather = weather && mem_readable(weather, 0x220);
     bool haveTime = time && mem_readable(time, 0x48);
     // A native clock hold/cutscene or scripted weather takes priority over both
     // clocks and precipitation. Minecraft keeps ticking and resumes afterwards.
     bool scriptedTime = haveTime && (time[0x45] || *(int32_t*)(time + 0x40) > 0);
     uint16_t clockHold = 0;
-    mem_read((void*)(g_base + 0x3D6D370), &clockHold, sizeof(clockHold));
+    mem_read((void*)(g_base + rva::kClockHold), &clockHold, sizeof(clockHold));
     bool scripted = scriptedTime || clockHold || (haveWeather && scripted_weather(weather));
     if (scripted) {
         release_environment_time();
@@ -287,7 +360,7 @@ static void service_environment(bool ready, uint32_t zone) {
         uint32_t hostSeconds = ((packed >> 34) & 31) * 3600 + ((packed >> 39) & 63) * 60 + ((packed >> 45) & 63);
         if (env.dayTicks != g_environmentTicks || env.timeRevision != g_environmentTimeRevision ||
             (hostSeconds != seconds && now - g_environmentTimeMs >= 250)) {
-            ((RequestWorldTime)(g_base + 0x644EF0))(time, seconds / 3600, seconds / 60 % 60, seconds % 60);
+            ((RequestWorldTime)(g_base + rva::kRequestWorldTime))(time, seconds / 3600, seconds / 60 % 60, seconds % 60);
             g_environmentTimeMs = now;
             g_environmentTicks = env.dayTicks;
             g_environmentTimeRevision = env.timeRevision;
@@ -317,7 +390,7 @@ static void service_environment(bool ready, uint32_t zone) {
             // Negative duration is the native non-expiring ordinary weather mode.
             // immediate=0 lets the engine blend sky, fog, precipitation and audio.
             EnvironmentWeatherRequest request = {(int16_t)(zone >> 24), kind, -1, 0, 0, 0};
-            if (!((RequestWorldWeather)(g_base + 0x6480C0))(weather, &request)) {
+            if (!((RequestWorldWeather)(g_base + rva::kRequestWorldWeather))(weather, &request)) {
                 release_environment_weather(false);
                 return;
             }
@@ -1243,21 +1316,17 @@ static void update_life(const Player* p) {
 // a player-owned Ruin Fragment "poke" bullet gives the hit reaction and aggro; Kill ends it
 // (death animation, drops, runes to the player).
 
+// The active build's combat addresses (GameBuild, set by use_build).
 namespace combat {
-constexpr uintptr_t kModifyHp = 0x436A40;      // void (CSChrDataModule*, int delta, u8, u8, f32, f32, u8)
-constexpr uintptr_t kSpawnBullet = 0x3A2CB0;   // u32* (CSBulletManager*, u32* outHandle, const BulletSpawnData*, u32* outErr)
-constexpr uintptr_t kCanTarget = 0x51B610;     // u32 (ChrIns* self, ChrIns* other)
-constexpr uintptr_t kForceDeath = 0x5EE570;    // void (ChrIns*, bool awardRunes): Kill without drops when false
-constexpr uintptr_t kCSBulletManager = 0x3D667A8;
-constexpr uintptr_t kSoloParamRepository = 0x3D85F58;
-constexpr uintptr_t kVtDebugChrCreator = 0x2A51220;
+static uintptr_t kModifyHp, kSpawnBullet, kCanTarget, kForceDeath;
+static uintptr_t kCSBulletManager, kSoloParamRepository, kVtDebugChrCreator;
 }  // namespace combat
 
 static const CodeSig kCombatSigs[] = {
-    {combat::kModifyHp, "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 57 48 83 EC 30 41 0F B6 F1 41 0F B6 E8 8B DA 48 8B F9 85 D2 79 1D", "CSChrDataModule::ModifyHp"},
-    {combat::kSpawnBullet, "40 53 55 56 57 48 81 EC 98 07 00 00", "CSBulletManager::SpawnBullet"},
-    {combat::kCanTarget, "40 56 48 83 EC 30 48 8B F2 48 85 C9 74 71", "CanTarget"},
-    {combat::kForceDeath, "48 85 C9 74 12 84 D2 75 07 80 89 C6 01 00 00 03", "ForceDeath"},
+    {&combat::kModifyHp, "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 57 48 83 EC 30 41 0F B6 F1 41 0F B6 E8 8B DA 48 8B F9 85 D2 79 1D", "CSChrDataModule::ModifyHp"},
+    {&combat::kSpawnBullet, "40 53 55 56 57 48 81 EC 98 07 00 00", "CSBulletManager::SpawnBullet"},
+    {&combat::kCanTarget, "40 56 48 83 EC 30 48 8B F2 48 85 C9 74 71", "CanTarget"},
+    {&combat::kForceDeath, "48 85 C9 74 12 84 D2 75 07 80 89 C6 01 00 00 03", "ForceDeath"},
 };
 static bool g_combatOk = false;
 
@@ -1769,15 +1838,16 @@ constexpr size_t kAbPressed = 0x81;    // u8: "Event Action tapped" latch; the g
 constexpr size_t kAbeParamId = 0x08;   // entry: ActionButtonParam row id
 
 // The game code that reads and writes those fields. A mismatch turns only actions off.
+static uintptr_t g_actionRva[6];  // GameBuild::action, set by use_build
 static const CodeSig kActionSigs[] = {
-    {0xA658A1, "80 BB 88 00 00 00 00 74 09 66 C7 83 81 00 00 00 01 01", "ActionButtonMan::UpdateInput (+0x81)"},
-    {0xA656CC, "80 BB 80 00 00 00 00 74 10 66 C7 83 80 00 00 00 00 00 C6 83 82 00 00 00 00",
+    {&g_actionRva[0], "80 BB 88 00 00 00 00 74 09 66 C7 83 81 00 00 00 01 01", "ActionButtonMan::UpdateInput (+0x81)"},
+    {&g_actionRva[1], "80 BB 80 00 00 00 00 74 10 66 C7 83 80 00 00 00 00 00 C6 83 82 00 00 00 00",
      "ActionButtonMan::UpdateInput (+0x80)"},
-    {0xA64FA0, "4C 8B C1 48 85 D2 74 61 0F B6 4A 20 F6 C1 04 74 58 41 80 B8 81 00 00 00 00", "ActionButtonMan::ConsumePress"},
-    {0xA64E61, "38 43 28 74 51 48 8B 4B 20 48 85 C9 74 48 0F B6 41 20 A8 08 75 40 A8 01 74 04 C6 43 2B 01 "
-               "F6 41 20 20 74 04 C6 43 2B 00 8B 41 10 89 43 2C", "ActionButtonMan::Update (prompt)"},
-    {0x266FC40, "3B 51 10 73 29 44 3B 41 14 73 23 48 8B 41 08", "MsgRepositoryImp::GetMsg"},
-    {0x2670510, "44 8B 41 0C 45 33 C9 41 FF C8 4C 8B D9 3B 51 2C", "FMG id lookup"},
+    {&g_actionRva[2], "4C 8B C1 48 85 D2 74 61 0F B6 4A 20 F6 C1 04 74 58 41 80 B8 81 00 00 00 00", "ActionButtonMan::ConsumePress"},
+    {&g_actionRva[3], "38 43 28 74 51 48 8B 4B 20 48 85 C9 74 48 0F B6 41 20 A8 08 75 40 A8 01 74 04 C6 43 2B 01 "
+                      "F6 41 20 20 74 04 C6 43 2B 00 8B 41 10 89 43 2C", "ActionButtonMan::Update (prompt)"},
+    {&g_actionRva[4], "3B 51 10 73 29 44 3B 41 14 73 23 48 8B 41 08", "MsgRepositoryImp::GetMsg"},
+    {&g_actionRva[5], "44 8B 41 0C 45 33 C9 41 FF C8 4C 8B D9 3B 51 2C", "FMG id lookup"},
 };
 static bool g_actionOk = false;
 
@@ -2387,7 +2457,7 @@ static bool g_fpsPatched = false;
 static void unlock_fps() {
     // The FPS limiter's float immediate, verified against this executable's .text.
     // Same delta-time method used by uberhalit/EldenRingFpsUnlockAndMore.
-    const uintptr_t rva = 0xE849BD;
+    const uintptr_t rva = rva::kFpsLimit;
     if (!bytes_match(g_base + rva, "C7 43 1C 89 88 88 3C EB")) {
         log("perf: FPS-limit instruction differs; leaving it unchanged"); return;
     }
@@ -2395,32 +2465,80 @@ static void unlock_fps() {
     g_fpsPatched = mem_write((void*)(g_base + rva + 3), &interval, sizeof(interval));
     log("perf: Elden Ring FPS cap %s", g_fpsPatched ? "144" : "unchanged (write failed)");
 }
+static void use_build(const GameBuild& b) {
+    g_build = &b;
+    rva::kWorldChrMan = b.worldChrMan;
+    rva::kCSCamera = b.csCamera;
+    rva::kCSHavokMan = b.csHavokMan;
+    rva::kCSTaskImp = b.csTaskImp;
+    rva::kRegisterTask = b.registerTask;
+    rva::kCastRay = b.castRay;
+    rva::kKill = b.kill;
+    rva::kCSActionButtonMan = b.csActionButtonMan;
+    rva::kMsgRepository = b.msgRepository;
+    rva::kWorldGeomMan = b.worldGeomMan;
+    rva::kWorldAreaTime = b.worldAreaTime;
+    rva::kWeather = b.weather;
+    rva::kClockHold = b.clockHold;
+    rva::kRequestWorldTime = b.requestWorldTime;
+    rva::kRequestWorldWeather = b.requestWorldWeather;
+    rva::kRequestRegionalWeather = b.requestRegionalWeather;
+    rva::kFpsLimit = b.fpsLimit;
+    rva::kVtWorldChrMan = b.vtWorldChrMan;
+    rva::kVtPlayerIns = b.vtPlayerIns;
+    rva::kVtEnemyIns = b.vtEnemyIns;
+    rva::kVtPersCam = b.vtPersCam;
+    rva::kVtTaskImp = b.vtTaskImp;
+    rva::kVtDataModule = b.vtDataModule;
+    rva::kVtPhysModule = b.vtPhysModule;
+    rva::kVtActionButtonMan = b.vtActionButtonMan;
+    rva::kVtMsgRepository = b.vtMsgRepository;
+    rva::kVtWorldGeomMan = b.vtWorldGeomMan;
+    rva::kVtGeomDynamicIns = b.vtGeomDynamicIns;
+    rva::kVtAnimSkeletonModifier = b.vtAnimSkeletonModifier;
+    combat::kModifyHp = b.modifyHp;
+    combat::kSpawnBullet = b.spawnBullet;
+    combat::kCanTarget = b.canTarget;
+    combat::kForceDeath = b.forceDeath;
+    combat::kCSBulletManager = b.csBulletManager;
+    combat::kSoloParamRepository = b.soloParamRepository;
+    combat::kVtDebugChrCreator = b.vtDebugChrCreator;
+    memcpy(g_actionRva, b.action, sizeof(g_actionRva));
+}
+
+static bool build_matches(const GameBuild& b) {
+    return bytes_match(g_base + b.registerTask, kSigRegisterTask) && bytes_match(g_base + b.castRay, kSigCastRay) &&
+        bytes_match(g_base + b.kill, kSigKill);
+}
+
 bool game_init() {
     g_base = main_module_base();
     log("game: eldenring.exe base %p size 0x%zx", (void*)g_base, main_module_size());
-    g_ok = true;
-    for (const CodeSig& s : kSigs) {
-        if (!bytes_match(g_base + s.rva, s.sig)) {
-            log("game: signature mismatch for %s at %p; unsupported Elden Ring build", s.name, (void*)(g_base + s.rva));
-            g_ok = false;
+    g_ok = false;
+    for (const GameBuild& b : kBuilds) {
+        if (build_matches(b)) {
+            use_build(b);
+            g_ok = true;
+            break;
         }
     }
-    if (!g_ok) return false;
-    g_environmentOk = bytes_match(g_base + 0x644EF0, "44 89 4C 24 20 44 89 44 24 18 89 54 24 10 48 83 EC 28") &&
-        bytes_match(g_base + 0x6480C0, "48 89 5C 24 10 48 89 74 24 20 57 48 83 EC 20") &&
-        bytes_match(g_base + 0x6481B0, "40 57 48 83 EC 50 48 C7 44 24 20 FE FF FF FF") &&
-        bytes_match(g_base + 0x648284, "48 8B 0D 65 51 72 03") &&
-        bytes_match(g_base + 0x64A75D, "48 8B 0D 04 2C 72 03") &&
-        bytes_match(g_base + 0x6480D5, "66 83 B9 1C 02 00 00 FF") &&
-        bytes_match(g_base + 0x647979, "0F B6 91 0F 02 00 00") &&
-        bytes_match(g_base + 0x644A61, "44 38 73 45") &&
-        bytes_match(g_base + 0x644A80, "44 39 73 40") &&
-        bytes_match(g_base + 0x644A72, "44 38 35 F7 88 72 03");
+    if (!g_ok) {
+        // Report against the newest table, the one most likely to be close.
+        use_build(kBuilds[sizeof(kBuilds) / sizeof(kBuilds[0]) - 1]);
+        for (const CodeSig& s : kSigs)
+            if (!bytes_match(g_base + *s.rva, s.sig))
+                log("game: signature mismatch for %s at %p; unsupported Elden Ring build", s.name, (void*)(g_base + *s.rva));
+        return false;
+    }
+    log("game: Elden Ring build %s", g_build->name);
+    g_environmentOk = true;
+    for (int i = 0; i < 7; i++) g_environmentOk = g_environmentOk && bytes_match(g_base + g_build->envCheck[i], kEnvCheckSigs[i]);
+    for (int i = 0; i < 3; i++) g_environmentOk = g_environmentOk && bytes_match(g_base + g_build->envRip[i], g_build->envRipSig[i]);
     log("game: world time/weather commands %s", g_environmentOk ? "enabled" : "disabled (signature mismatch)");
     unlock_fps();
     g_combatOk = true;
     for (const CodeSig& a : kCombatSigs) {
-        if (!bytes_match(g_base + a.rva, a.sig)) {
+        if (!bytes_match(g_base + *a.rva, a.sig)) {
             log("game: %s differs; basic combat only", a.name);
             g_combatOk = false;
         }
@@ -2428,7 +2546,7 @@ bool game_init() {
     if (g_combatOk) patch_poke_row();
     g_actionOk = true;
     for (const CodeSig& a : kActionSigs) {
-        if (!bytes_match(g_base + a.rva, a.sig)) {
+        if (!bytes_match(g_base + *a.rva, a.sig)) {
             log("game: %s differs; Elden Ring actions disabled", a.name);
             g_actionOk = false;
         }
@@ -2452,7 +2570,7 @@ void game_shutdown() {
     if (g_environmentOk) release_environment();
     if (g_fpsPatched) {
         float interval = 1.0f / 60.0f;
-        mem_write((void*)(g_base + 0xE849C0), &interval, sizeof(interval));
+        mem_write((void*)(g_base + rva::kFpsLimit + 3), &interval, sizeof(interval));
         g_fpsPatched = false;
     }
     restore_poke_row();

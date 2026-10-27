@@ -3,8 +3,8 @@
 [Back to Minecraft Ring](../README.md)
 
 This guide describes the current source-build workflow for Minecraft Ring
-0.3.0. It targets Windows x64, Elden Ring App Ver. 1.17.1 (`eldenring.exe`
-2.7.1.0), and Minecraft Java Edition 1.21.1.
+0.3.0. It targets Windows x64, Elden Ring App Ver. 1.17.2 (`eldenring.exe`
+2.7.2.0) or 1.17.1 (`eldenring.exe` 2.7.1.0), and Minecraft Java Edition 1.21.1.
 
 ## Toolchains
 
