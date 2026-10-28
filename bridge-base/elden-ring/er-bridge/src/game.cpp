@@ -71,6 +71,9 @@ struct GameBuild {
     uintptr_t vtDebugChrCreator;        // CSDebugChrCreator
     uintptr_t vtCGDepthStencilView;     // DLCG3::CGDepthStencilView (compositor depth scan)
     uintptr_t vtCGTexture2D;            // DLCG3::CGTexture2D
+    // ULTRAKILL extensions (ultrakill.cpp); 0 = found by signature at startup
+    uintptr_t eventFlagMan;             // static CSEventFlagMan*
+    uintptr_t menuMan;                  // static CSMenuManImp*
 };
 
 static const GameBuild kBuilds[] = {
@@ -85,7 +88,8 @@ static const GameBuild kBuilds[] = {
      {0x648284, 0x64A75D, 0x644A72},
      0x2A4E980, 0x2A7FBB0, 0x2A47090, 0x2AA0A40, 0x2C04B00, 0x2A380B8, 0x2A3C890,
      0x2B48140, 0x2BAD530, 0x2A89130, 0x2A87278, 0x2B6F1A0, 0x2A51220,
-     0x30A7850, 0x30A7030},
+     0x30A7850, 0x30A7030,
+     0, 0},
     {"2.7.2.0 (App Ver. 1.17.2)",
      0x3D6D018, 0x3D699E8, 0x3D7D0F0, 0x4592EA8, 0x3D75498, 0x3D84588, 0x3D70C38, 0x3D697C8, 0x3D88F78,
      0x3D70388, 0x3D70410, 0x3D70390,
@@ -97,7 +101,8 @@ static const GameBuild kBuilds[] = {
      {0x648734, 0x64AC0D, 0x644F22},
      0x2A509D0, 0x2A81CB0, 0x2A49090, 0x2AA2B30, 0x2C06DB0, 0x2A3A0C8, 0x2A3E890,
      0x2B4A230, 0x2BAF7E0, 0x2A8B230, 0x2A89378, 0x2B71290, 0x2A53340,
-     0x30A9B10, 0x30A92F0},
+     0x30A9B10, 0x30A92F0,
+     0x3D6F4D8, 0x3D72840},
 };
 static const GameBuild* g_build = nullptr;
 
@@ -1048,6 +1053,104 @@ static void update_passages(bool standing, void* ignore) {
     }
 }
 
+constexpr size_t kChrLastHitByOff = 0x180;  // FieldInsHandle of the last attacker, -1 = none
+
+// One hit on the stand-in -> the guest (hunter events). `by` is the attacker the game recorded
+// on the Tarnished (last_hit_by, reset by the caller after each hit so falls and poison aren't
+// blamed on it); without one, the nearest hostile character. Its position gives the guest the
+// knockback direction and the "slain by" name.
+static void report_hit(const ErmcControl* c, float dmg, int mx, uint64_t by, uint32_t kindBits) {
+    ErmcHunterEvents* ev = shm_hunter();
+    ev->seq = ev->seq + 1;
+    __asm__ __volatile__("" ::: "memory");
+    ev->hitCount = ev->hitCount + 1;
+    ev->totalDamage = ev->totalDamage + dmg;
+    ev->lastDamage = dmg;
+    float apos[3];
+    uint32_t akind = 0;
+    if ((uint32_t)by != 0xFFFFFFFFu && published_attacker(by, apos, &akind)) {
+        memcpy(ev->lastHitFrom, apos, 12);
+        ev->lastHitKind = akind | kindBits;
+    } else if (g_nearestHostile.valid) {
+        memcpy(ev->lastHitFrom, g_nearestHostile.pos, 12);
+        ev->lastHitKind = g_nearestHostile.kind | kindBits;
+    } else {
+        memcpy(ev->lastHitFrom, c->hunterPos, 12);
+        ev->lastHitKind = ERMC_ENT_LARGE_MONSTER | kindBits;
+    }
+    ev->hunterMaxHp = (float)mx;
+    ev->lastHitFrame = shm_state()->frame;
+    __asm__ __volatile__("" ::: "memory");
+    ev->seq = ev->seq + 1;
+    log("stand-in: the player took %.0f damage%s", dmg, (kindBits & ERMC_HUNTERKIND_PARRIED) ? " (parried)" : "");
+}
+
+// Elden Ring owns V1's health (ULTRAKILL guest, HOSTFLAG_OWNS_HEALTH): the Tarnished's HP is
+// real and V1's bar mirrors it (ultrakill.cpp publishes it). Hits while V1 dashes or has hurt
+// i-frames are undone, a hit from a nearby attacker while a punch's parry window is open is
+// undone and reported as parried (the guest plays the parry), and V1's heals heal the
+// Tarnished. NoDead turns a lethal hit into 1 HP: then DEAD is published and V1 dies first;
+// its death (mcDeaths) kills the Tarnished in update_life, or a timeout does.
+static bool g_ukDead = false;        // a lethal hit was intercepted, waiting for V1 to die
+static uint64_t g_ukDeadMs = 0;
+static bool g_ukSharedDeath = false; // the Tarnished died standing in (DEAD until it respawns)
+static float g_ukChip = 0;           // damage without an attacker not reported yet (status effects)
+constexpr float kParryRange = 4.0f;  // metres, attacker to V1 (horizontal)
+
+static void stand_in_owned_hp(const Player& p, const ErmcControl* c) {
+    int hp = *(int*)(p.data + kDataHp), mx = *(int*)(p.data + kDataMaxHp);
+    if (g_ukDead || g_lastHp < 0 || mx <= 0) {
+        g_lastHp = hp;
+        return;
+    }
+    if (hp < g_lastHp) {
+        int dmg = g_lastHp - hp;
+        uint64_t by = *(uint64_t*)(p.ins + kChrLastHitByOff);
+        *(uint64_t*)(p.ins + kChrLastHitByOff) = ~0ull;
+        bool attacker = (uint32_t)by != 0xFFFFFFFFu;
+        uint32_t f = uk_guest_combat_flags();
+        float apos[3];
+        uint32_t akind = 0;
+        bool inReach = false;
+        if (attacker && published_attacker(by, apos, &akind)) {
+            float dx = apos[0] - c->hunterPos[0], dz = apos[2] - c->hunterPos[2];
+            inReach = dx * dx + dz * dz < kParryRange * kParryRange;
+        }
+        if (f & (ERMC_GREQ_COMBAT_DASHING | ERMC_GREQ_COMBAT_HURT_FRAMES)) {
+            hp = g_lastHp;
+            *(int*)(p.data + kDataHp) = hp;
+            log("stand-in: %d damage dodged (V1 %s)", dmg, (f & ERMC_GREQ_COMBAT_DASHING) ? "dashing" : "has i-frames");
+        } else if ((f & ERMC_GREQ_COMBAT_PARRY_WINDOW) && inReach && uk_take_parry()) {
+            hp = g_lastHp;
+            *(int*)(p.data + kDataHp) = hp;
+            report_hit(c, (float)dmg, mx, by, ERMC_HUNTERKIND_PARRIED);
+        } else if (!attacker && hp > 1) {
+            // Poison, rot, bleed and fire ticks: V1's bar follows the HP at once; the hurt
+            // feedback waits until they add up to 2 % of max HP.
+            g_ukChip += (float)dmg;
+            if (g_ukChip >= 0.02f * (float)mx) {
+                report_hit(c, g_ukChip, mx, by, 0);
+                g_ukChip = 0;
+            }
+        } else {
+            report_hit(c, (float)dmg, mx, by, 0);
+            if (hp <= 1) {
+                g_ukDead = true;
+                g_ukDeadMs = now_ms();
+                log("stand-in: lethal hit; V1 dies first, then the Tarnished");
+            }
+        }
+    }
+    float heal = g_ukDead ? 0.0f : uk_take_heal(mx);
+    if (heal > 0 && hp < mx) {
+        int h = (int)lroundf(heal);
+        if (h < 1) h = 1;
+        hp = hp + h > mx ? mx : hp + h;
+        *(int*)(p.data + kDataHp) = hp;
+    }
+    g_lastHp = hp;
+}
+
 static void stand_in(const Player& p, const ErmcControl* c, bool active) {
     if (g_standPlayer && g_standPlayer != p.ins) {
         g_putHavokValid = false;
@@ -1125,6 +1228,11 @@ static void stand_in(const Player& p, const ErmcControl* c, bool active) {
     memcpy(p.phys + kPhysQuat, q, 16);
     memcpy(p.phys + kPhysQuatInterp, q, 16);
 
+    if (uk_owns_health()) {
+        g_clampFrames = 0;
+        stand_in_owned_hp(p, c);
+        return;
+    }
     int hp = *(int*)(p.data + kDataHp), mx = *(int*)(p.data + kDataMaxHp);
     // NoDead turns lethal damage into "1 HP left". Once, that is a big hit (Minecraft decides
     // whether it kills). Every tick in a row, it is the game killing the Tarnished (a kill
@@ -1132,35 +1240,9 @@ static void stand_in(const Player& p, const ErmcControl* c, bool active) {
     bool clamped = hp == 1 && g_lastHp > 1;
     g_clampFrames = clamped ? g_clampFrames + 1 : 0;
     if (g_lastHp > 0 && hp < g_lastHp && g_clampFrames <= 1) {
-        float dmg = (float)(g_lastHp - hp);
-        ErmcHunterEvents* ev = shm_hunter();
-        ev->seq = ev->seq + 1;
-        __asm__ __volatile__("" ::: "memory");
-        ev->hitCount = ev->hitCount + 1;
-        ev->totalDamage = ev->totalDamage + dmg;
-        ev->lastDamage = dmg;
-        // Blame the attacker the game recorded on the Tarnished (last_hit_by, reset after each
-        // hit so falls and poison aren't blamed on it), else the nearest hostile character. Its
-        // position gives Minecraft the knockback direction and the "slain by" name.
-        uint64_t by = *(uint64_t*)(p.ins + 0x180);
-        *(uint64_t*)(p.ins + 0x180) = ~0ull;
-        float apos[3];
-        uint32_t akind = 0;
-        if ((uint32_t)by != 0xFFFFFFFFu && published_attacker(by, apos, &akind)) {
-            memcpy(ev->lastHitFrom, apos, 12);
-            ev->lastHitKind = akind;
-        } else if (g_nearestHostile.valid) {
-            memcpy(ev->lastHitFrom, g_nearestHostile.pos, 12);
-            ev->lastHitKind = g_nearestHostile.kind;
-        } else {
-            memcpy(ev->lastHitFrom, c->hunterPos, 12);
-            ev->lastHitKind = ERMC_ENT_LARGE_MONSTER;
-        }
-        ev->hunterMaxHp = (float)mx;
-        ev->lastHitFrame = shm_state()->frame;
-        __asm__ __volatile__("" ::: "memory");
-        ev->seq = ev->seq + 1;
-        log("stand-in: the player took %.0f damage -> Minecraft", dmg);
+        uint64_t by = *(uint64_t*)(p.ins + kChrLastHitByOff);
+        *(uint64_t*)(p.ins + kChrLastHitByOff) = ~0ull;
+        report_hit(c, (float)(g_lastHp - hp), mx, by, 0);
     }
     if (mx > 0) *(int*)(p.data + kDataHp) = mx;  // never faint while standing in
     g_lastHp = mx;
@@ -1260,6 +1342,9 @@ static void update_life(const Player* p) {
     case LIFE_NONE:
     case LIFE_DEAD:
         if (!dead) {
+            g_ukDead = false;
+            g_ukSharedDeath = false;
+            g_ukChip = 0;
             if (g_quickSettle) start_settling(*p, 10, 0, "character present");
             else start_settling(*p, 90, 45, g_life == LIFE_DEAD ? "respawned" : "loaded");
             g_quickSettle = false;
@@ -1284,12 +1369,22 @@ static void update_life(const Player* p) {
             kill_player(*p);
             dead = true;
         }
+        if (!dead && g_ukDead && now - g_ukDeadMs > 3000) {
+            // Elden Ring owns the health and published DEAD, but V1 did not die (a guest with
+            // its own health model): the Tarnished dies, and hostDeaths takes V1 with it.
+            log("life: V1 did not die within 3 s of the lethal hit -> the Tarnished dies");
+            kill_player(*p);
+            dead = true;
+            standing = true;
+        }
         if (dead) {
+            if (standing || g_expectDeath || g_ukDead) g_ukSharedDeath = true;
             if (standing && !g_expectDeath) {
                 shm_header()->hostDeaths = shm_header()->hostDeaths + 1;
                 log("life: the Tarnished died -> Minecraft's player dies too");
             }
             g_expectDeath = false;
+            g_ukDead = false;
             set_life(LIFE_DEAD, "died");
             break;
         }
@@ -1699,7 +1794,10 @@ static void apply_hit(const Player& me, const Chr& c, const ErmcDamage& d) {
     if (chr_dead(c)) return;
     int hp = *(int*)(c.data + kDataHp), mx = *(int*)(c.data + kDataMaxHp);
     if (mx <= 0) return;
-    int dmg = (int)ceilf(er_damage(d.amount, mx));
+    // ULTRAKILL stat entries (ultrakill.cpp: attack rating x weapon factor); otherwise the
+    // legacy amount, a share of the target's max HP.
+    float stat = uk_hit_damage(d);
+    int dmg = (int)ceilf(stat >= 0.0f ? stat : er_damage(d.amount, mx));
     if (dmg < 1) dmg = 1;
     int model = *(int*)(c.ins + kChrModelId);
     const char* crit = (d.flags & ERMC_DAMAGE_CRITICAL) ? " critical" : "";
@@ -2354,6 +2452,7 @@ static void __fastcall task_tick(void* /*self*/, const void* /*data*/) {
     QueryPerformanceCounter(&t0);
     InterlockedExchange(&g_tickAlive, 1);
     handle_switching();
+    uk_tick_begin();
 
     Player p;
     bool havePlayer = get_player(&p) && block_valid(p);
@@ -2385,6 +2484,16 @@ static void __fastcall task_tick(void* /*self*/, const void* /*data*/) {
         clear_entities();
     }
     publish_prompt(alive && g_standing);
+    UkTick uk = {};
+    if (havePlayer) {
+        uk.playerIns = p.ins;
+        uk.hp = *(int*)(p.data + kDataHp);
+        uk.maxHp = *(int*)(p.data + kDataMaxHp);
+    }
+    uk.alive = alive;
+    uk.standing = g_standing;
+    uk.dead = g_ukDead || (g_life == LIFE_DEAD && g_ukSharedDeath);
+    uk_publish(uk);
 
     frame_claim_source();
     on_frame();
@@ -2531,6 +2640,7 @@ bool game_init() {
         return false;
     }
     log("game: Elden Ring build %s", g_build->name);
+    uk_init(g_base, UkBuild{g_build->eventFlagMan, g_build->menuMan});
     g_environmentOk = true;
     for (int i = 0; i < 7; i++) g_environmentOk = g_environmentOk && bytes_match(g_base + g_build->envCheck[i], kEnvCheckSigs[i]);
     for (int i = 0; i < 3; i++) g_environmentOk = g_environmentOk && bytes_match(g_base + g_build->envRip[i], g_build->envRipSig[i]);
@@ -2574,6 +2684,7 @@ void game_shutdown() {
         g_fpsPatched = false;
     }
     restore_poke_row();
+    uk_shutdown();
     // Hand the character back (NoMove, gravity, NoDead, rendering).
     Player p;
     if (g_standing && get_player(&p)) release_player(p.ins, p.data, p.phys);

@@ -2,6 +2,7 @@
 #include <windows.h>
 #include <stdint.h>
 #include "bridge_protocol.h"
+#include "bridge_protocol_ext.h"
 
 namespace mb {
 
@@ -38,6 +39,10 @@ ErmcTerrainContacts* shm_contacts();
 ErmcCollisionControl* shm_collision_control();
 ErmcHunterEvents* shm_hunter();
 ErmcDamageQueue* shm_damage();
+// Optional ULTRAKILL Crossover Bridge extensions (bridge_protocol_ext.h).
+ErmcHostEvents* shm_host_events();
+ErmcGuestRequests* shm_guest_requests();
+ErmcHostCombat* shm_host_combat();
 
 // Seqlock writer for the state block (ER is the only writer).
 void state_begin_write();
@@ -82,6 +87,30 @@ bool compositor_init();
 void compositor_poll();       // worker thread: retries compositor_init until the game has a swapchain
 void compositor_depth_poll(); // worker thread: runs a requested scan for the game's depth buffers
 void game_worker_poll();      // worker thread: lists doors, levers... near the player (reach)
+
+// ultrakill.cpp: host side of the ULTRAKILL guest's optional protocol extensions.
+struct UkBuild {
+    uintptr_t eventFlagMan;         // static CSEventFlagMan* (0: find it by signature)
+    uintptr_t menuMan;              // static CSMenuManImp* (0: find it by signature)
+};
+struct UkTick {
+    uint8_t* playerIns;             // PlayerIns*, or null
+    bool alive;                     // usable (LIFE_ALIVE)
+    bool standing;                  // standing in for V1 this tick
+    int hp, maxHp;                  // the Tarnished's HP (valid with playerIns)
+    bool dead;                      // the host considers the character dead (ERMC_COMBAT_DEAD)
+};
+void uk_init(uintptr_t base, const UkBuild& b);
+void uk_tick_begin();               // once per game tick, before anything below
+bool uk_guest_present();            // an ULTRAKILL guest publishes its request block and is running
+bool uk_owns_health();              // Elden Ring owns V1's health this tick (HOSTFLAG_OWNS_HEALTH)
+uint32_t uk_guest_combat_flags();   // ERMC_GREQ_COMBAT_* (0 unless the guest is present)
+float uk_take_heal(int maxHp);      // Elden Ring HP V1 asked to heal since the last call
+bool uk_take_parry();               // consumes the guest's newest punch (true once per punch)
+float uk_hit_damage(const ErmcDamage& d);  // Elden Ring HP of a STAT damage entry, or -1 for a legacy entry
+void uk_publish(const UkTick& t);   // once per game tick, after the stand-in
+void uk_shutdown();
+
 void compositor_detach();    // shutdown step 1: the Present stubs go straight to the originals
 void compositor_shutdown();  // step 2: release D3D12 objects
 void compositor_note_applied_pose(uint64_t poseId);  // camera task: the pose this game frame uses

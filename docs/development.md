@@ -8,6 +8,7 @@
 | --- | --- |
 | `bridge-base/elden-ring/er-bridge/src/proxy.cpp` | `dinput8.dll` loader; gates activation and loads the core |
 | `er-bridge/src/game.cpp` | Player and camera hooks, host interactions, terrain rays and moving support |
+| `er-bridge/src/ultrakill.cpp` | Optional ULTRAKILL guest extensions: health, stats, damage stat, weapon progression and menu input hand-off |
 | `er-bridge/src/compositor.cpp`, `gpu_transport.h` | D3D12 compositing, depth occlusion and GPU frame acknowledgements |
 | `er-bridge/src/crash.cpp` | Fault context, thread stacks and minidumps |
 | `mc-bridge/src/main/java/dev/ermc/bridge/` | Server-side terrain, collision shapes, moving platforms and shared life |
@@ -25,6 +26,14 @@ Paths abbreviated to `er-bridge/` and `mc-bridge/` above are relative to
 layout. Keep them synchronized. The bridge uses file-backed mappings under
 `ERMC_DIR`; the Windows launcher sets it to the project's `runtime/` directory.
 Java can also override the directory with `-Derbridge.dir=<path>`.
+
+`er-bridge/include/bridge_protocol_ext.h` is a copy of the
+[ULTRAKILL Crossover Bridge](https://github.com/Themetralla3000/ultrakill-crossover-bridge)'s
+`protocol/c/bridge_protocol_ext.h`. Those blocks (0x360000 onwards) are only
+written while an ULTRAKILL guest publishes its request block; Minecraft never
+does. `ultrakill.cpp` reads `PlayerGameData`, `CSEventFlagMan` and
+`CSMenuManImp` with the layouts of fromsoftware-rs for 2.7.2.0; its settings
+are in `<bridge dir>\er-bridge.ini`.
 
 State and control slots use sequence counters so readers can reject an update
 in progress. Terrain queries, moving-platform cells, enemy state and combat

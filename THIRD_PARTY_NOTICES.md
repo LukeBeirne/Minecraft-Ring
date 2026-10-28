@@ -11,6 +11,11 @@ Hacker Disassembler Engine notices, is preserved in
 [LICENSE.txt](bridge-base/elden-ring/er-bridge/third_party/minhook/LICENSE.txt).
 Preserve these notices when distributing compiled bridge DLLs as well.
 
+`bridge-base/elden-ring/er-bridge/include/bridge_protocol_ext.h` is copied from
+[ULTRAKILL Crossover Bridge](https://github.com/Themetralla3000/ultrakill-crossover-bridge)
+(MIT License, Copyright (c) 2026 Arnau Encinas). Game structure layouts used by
+`ultrakill.cpp` follow [fromsoftware-rs](https://github.com/vswarte/fromsoftware-rs).
+
 The Gradle wrapper is build infrastructure distributed under the
 [Apache License 2.0](https://github.com/gradle/gradle/blob/master/LICENSE).
 Minecraft, Fabric Loader, Fabric API and other downloaded dependencies retain

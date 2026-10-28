@@ -8,6 +8,26 @@
   The native bridge detects the build at startup and uses its address table;
   App Ver. 1.17.1 (`eldenring.exe` 2.7.1.0) remains supported.
 
+### ULTRAKILL guest extensions
+
+- The native bridge implements the optional extensions of the
+  [ULTRAKILL Crossover Bridge](https://github.com/Themetralla3000/ultrakill-crossover-bridge)
+  protocol (`bridge_protocol_ext.h`, its docs/protocol.md section 8). They only
+  turn on while an ULTRAKILL guest publishes its request block, so Minecraft
+  behaves as before.
+  - Host-owned health: the Tarnished's real HP is V1's health. Dash and hurt
+    i-frames undo Elden Ring hits, a punch parries a nearby attacker, ULTRAKILL
+    heals heal the Tarnished, and a lethal hit kills V1 first.
+  - Weapon progression: bosses defeated from the global boss flags
+    (9100-9299), with the character as the run seed.
+  - Stat ratios: Dexterity drives attack speed, max FP alt-fire recharge, max
+    stamina dash recharge.
+  - Stat damage: ULTRAKILL damage scales with the best weapon's attack rating.
+  - Menu hand-off: while a menu blocks Elden Ring's actions (Site of Grace,
+    talking, item pop-ups), the guest hands input to Elden Ring.
+  - Settings in `<bridge dir>\er-bridge.ini` (`[ULTRAKILL]`), written with
+    defaults on first run.
+
 ## 0.3.0 — 2026-10-06
 
 ### Terrain collision

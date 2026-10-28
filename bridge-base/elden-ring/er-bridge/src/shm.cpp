@@ -39,6 +39,9 @@ bool shm_open() {
     // The previous session may have left a request that was never answered.
     shm_cmd()->respSeq = shm_cmd()->reqSeq;
     if (h->hostPid != GetCurrentProcessId()) {
+        // Optional extension blocks this host writes: a previous session's flags must not survive.
+        memset(shm_host_events(), 0, sizeof(ErmcHostEvents));
+        memset(shm_host_combat(), 0, sizeof(ErmcHostCombat));
         h->hostPid = GetCurrentProcessId();
         h->hostStartMs = now_ms();
         h->coreGeneration = 0;
@@ -66,6 +69,9 @@ ErmcPlatformTable* shm_platforms() { return (ErmcPlatformTable*)(g_base + ERMC_O
 ErmcTerrainContacts* shm_contacts() { return (ErmcTerrainContacts*)(g_base + ERMC_OFF_CONTACTS); }
 ErmcCollisionControl* shm_collision_control() { return (ErmcCollisionControl*)(g_base + ERMC_OFF_COLLISION_CONTROL); }
 ErmcDamageQueue* shm_damage() { return (ErmcDamageQueue*)(g_base + ERMC_OFF_DAMAGE); }
+ErmcHostEvents* shm_host_events() { return (ErmcHostEvents*)(g_base + ERMC_OFF_HOST_EVENTS); }
+ErmcGuestRequests* shm_guest_requests() { return (ErmcGuestRequests*)(g_base + ERMC_OFF_GUEST_REQUESTS); }
+ErmcHostCombat* shm_host_combat() { return (ErmcHostCombat*)(g_base + ERMC_OFF_HOST_COMBAT); }
 
 // x86 (and Rosetta's emulation of it) is TSO: stores are not reordered with other stores
 // and loads are not reordered with other loads, so compiler barriers are sufficient here.
